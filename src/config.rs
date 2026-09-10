@@ -736,6 +736,16 @@ impl Config {
         store_path(Self::file_(""), config)
     }
 
+    fn store_durable_result(&self) -> Result<()> {
+        self.store_result()?;
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(Self::file_(""))?
+            .sync_all()?;
+        Ok(())
+    }
+
     fn store(&self) {
         if let Err(err) = self.store_result() {
             log::error!("Failed to store config: {err}");
@@ -1336,7 +1346,7 @@ impl Config {
         let mut candidate = config.clone();
         candidate.password = stored;
         if require_durable_store {
-            if let Err(err) = candidate.store_result() {
+            if let Err(err) = candidate.store_durable_result() {
                 log::error!("Failed to durably store permanent password: {err}");
                 return false;
             }
