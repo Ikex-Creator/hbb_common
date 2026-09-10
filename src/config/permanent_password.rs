@@ -1,5 +1,6 @@
 use sha2::{Digest, Sha256};
 use sodiumoxide::base64;
+use zeroize::Zeroize;
 
 use crate::{
     log,
@@ -48,6 +49,16 @@ pub(super) fn encode_permanent_password_encrypted_storage_from_h1(
 ) -> Option<String> {
     let hashed_storage = encode_permanent_password_storage_from_h1(h1);
     encrypt_permanent_password_storage(&hashed_storage)
+}
+
+pub(super) fn encode_permanent_password_encrypted_storage_from_plain(
+    password: &str,
+    salt: &str,
+) -> Option<String> {
+    let mut h1 = compute_permanent_password_h1(password, salt);
+    let storage = encode_permanent_password_encrypted_storage_from_h1(&h1);
+    h1.zeroize();
+    storage
 }
 
 pub(super) fn decode_permanent_password_h1_from_hashed_storage(

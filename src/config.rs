@@ -28,7 +28,8 @@ pub use permanent_password::{
 };
 use permanent_password::{
     decode_permanent_password_h1_from_hashed_storage, decrypt_permanent_password_str_or_original,
-    encode_permanent_password_encrypted_storage_from_h1, password_is_empty_or_not_hashed,
+    encode_permanent_password_encrypted_storage_from_h1,
+    encode_permanent_password_encrypted_storage_from_plain, password_is_empty_or_not_hashed,
     preset_permanent_password_storage_matches_plain, DEFAULT_SALT_LEN, PASSWORD_ENC_VERSION,
 };
 
@@ -712,7 +713,7 @@ impl Config {
         }
     }
 
-    fn store(&self) {
+    fn store_result(&self) -> Result<()> {
         let mut config = self.clone();
         Self::prepare_config_for_store(&mut config);
         if !config.password.is_empty()
@@ -729,7 +730,23 @@ impl Config {
                 encrypt_str_or_original(&config.id, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
         }
         config.id = "".to_owned();
-        Config::store_(&config, "");
+        store_path(Self::file_(""), config)
+    }
+
+    fn store_durable_result(&self) -> Result<()> {
+        self.store_result()?;
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(Self::file_(""))?
+            .sync_all()?;
+        Ok(())
+    }
+
+    fn store(&self) {
+        if let Err(err) = self.store_result() {
+            log::error!("Failed to store config: {err}");
+        }
     }
 
     pub fn file() -> PathBuf {
@@ -1288,6 +1305,16 @@ impl Config {
     /// preset password. Returns `false` when changing the password is disabled or
     /// the new password cannot be prepared for storage.
     pub fn set_permanent_password(password: &str) -> bool {
+        Self::set_permanent_password_inner(password, false)
+    }
+
+    /// Sets the local permanent password and confirms the derived representation
+    /// and salt can be read back from disk before reporting success.
+    pub fn set_permanent_password_durable(password: &str) -> bool {
+        Self::set_permanent_password_inner(password, true)
+    }
+
+    fn set_permanent_password_inner(password: &str, require_durable_store: bool) -> bool {
         if Self::is_disable_change_permanent_password() {
             return false;
         }
@@ -1313,8 +1340,22 @@ impl Config {
         if stored == config.password {
             return true;
         }
-        config.password = stored;
-        config.store();
+        let mut candidate = config.clone();
+        candidate.password = stored;
+        if require_durable_store {
+            if let Err(err) = candidate.store_durable_result() {
+                log::error!("Failed to durably store permanent password: {err}");
+                return false;
+            }
+            let persisted = Config::load_::<Config>("");
+            if persisted.password != candidate.password || persisted.salt != candidate.salt {
+                log::error!("Permanent password durable read-back verification failed");
+                return false;
+            }
+        } else {
+            candidate.store();
+        }
+        *config = candidate;
         Self::clear_trusted_devices();
         true
     }
@@ -1326,8 +1367,7 @@ impl Config {
         // Keep salt stable for user-initiated permanent password updates.
         // Salt should only change when service->user sync updates storage and salt as a pair.
         Self::ensure_permanent_password_salt(config);
-        let h1 = compute_permanent_password_h1(password, &config.salt);
-        encode_permanent_password_encrypted_storage_from_h1(&h1)
+        encode_permanent_password_encrypted_storage_from_plain(password, &config.salt)
     }
 
     /// Returns the locally persisted permanent password storage and salt (NOT the hard/preset one).

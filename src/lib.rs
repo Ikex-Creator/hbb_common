@@ -225,8 +225,29 @@ pub fn get_version_from_url(url: &str) -> String {
     "".to_owned()
 }
 
+fn reproducible_build_date(source_date_epoch: &str) -> Result<String, &'static str> {
+    use chrono::TimeZone;
+
+    if source_date_epoch.is_empty()
+        || source_date_epoch.len() > 12
+        || (source_date_epoch != "0" && source_date_epoch.starts_with('0'))
+        || !source_date_epoch.bytes().all(|value| value.is_ascii_digit())
+    {
+        return Err("SOURCE_DATE_EPOCH is not one canonical non-negative epoch");
+    }
+    let timestamp = source_date_epoch
+        .parse::<i64>()
+        .map_err(|_| "SOURCE_DATE_EPOCH is outside the supported range")?;
+    let date = chrono::Utc
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .ok_or("SOURCE_DATE_EPOCH is outside the supported range")?;
+    Ok(date.format("%Y-%m-%d %H:%M").to_string())
+}
+
 pub fn gen_version() {
     println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     use std::io::prelude::*;
     let mut file = File::create("./src/version.rs").unwrap();
     for line in read_lines("Cargo.toml").unwrap().flatten() {
@@ -237,8 +258,17 @@ pub fn gen_version() {
             break;
         }
     }
-    // generate build date
-    let build_date = format!("{}", chrono::Local::now().format("%Y-%m-%d %H:%M"));
+    // Release builds use the canonical source timestamp. Interactive upstream
+    // builds retain the existing local-clock behavior when the variable is absent.
+    let build_date = match std::env::var("SOURCE_DATE_EPOCH") {
+        Ok(value) => reproducible_build_date(&value).unwrap_or_else(|message| panic!("{message}")),
+        Err(std::env::VarError::NotPresent) => {
+            format!("{}", chrono::Local::now().format("%Y-%m-%d %H:%M"))
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("SOURCE_DATE_EPOCH is not valid Unicode")
+        }
+    };
     file.write_all(
         format!("#[allow(dead_code)]\npub const BUILD_DATE: &str = \"{build_date}\";\n").as_bytes(),
     )
@@ -567,6 +597,21 @@ mod test {
             "prompt {}",
             "failed"
         );
+    }
+
+    #[test]
+    fn test_reproducible_build_date() {
+        assert_eq!(
+            reproducible_build_date("0").unwrap(),
+            "1970-01-01 00:00"
+        );
+        assert_eq!(
+            reproducible_build_date("1789043640").unwrap(),
+            "2026-09-10 12:34"
+        );
+        for invalid in ["", "01", "-1", "+1", "1.0", "9999999999999"] {
+            assert!(reproducible_build_date(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]
